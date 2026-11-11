@@ -1,0 +1,21 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Environment Variables & Secrets
+.env
+*.env.local
+!.env.example
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ChromaDB & Local Data
+data/chroma_db/
+*.log
+
+# Antigravity & Agent Scratch Files
+.agents/

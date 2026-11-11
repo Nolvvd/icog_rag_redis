@@ -1,0 +1,19 @@
+# Core Web Framework
+streamlit>=1.30.0
+
+# Document Extraction & Vector Database
+pymupdf>=1.23.0
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+
+# Redis & Caching Engine
+redis>=5.0.0
+fakeredis>=2.20.0
+
+# LLM Providers & Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+numpy>=1.24.0
+
+# Testing & Quality
+pytest>=7.4.0
