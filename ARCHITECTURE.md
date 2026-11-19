@@ -4,53 +4,57 @@
 
 ### High-Level Architectural Flow
 
-```
-                                  +---------------------+
-                                  |    User Question    |
-                                  +---------------------+
-                                             |
-                                             v
-                           +-----------------------------------+
-                           | 1. Query Normalization & Hash     |
-                           |    key = sha256(q + doc_v + model)|
-                           +-----------------------------------+
-                                             |
-                                             v
-                                  +---------------------+
-                                  |   2. Check Redis    |
-                                  |     (Cache-Aside)   |
-                                  +---------------------+
-                                        /       \
-                        [Cache HIT]    /         \    [Cache MISS / Fallback]
-                                      v           v
-           +-----------------------------+     +-------------------------------+
-           | Return Stored JSON Payload  |     | 3. Dense Vector Retrieval     |
-           | {answer, sources, metadata} |     |    (ChromaDB Cosine Sim)      |
-           +-----------------------------+     +-------------------------------+
-                          |                                   |
-                          |                                   v
-                          |                    +-------------------------------+
-                          |                    | 4. Context Grounded Prompt    |
-                          |                    +-------------------------------+
-                          |                                   |
-                          |                                   v
-                          |                    +-------------------------------+
-                          |                    | 5. LLM Answer Generation      |
-                          |                    |    (Gemini / OpenAI / Fallback)
-                          |                    +-------------------------------+
-                          |                                   |
-                          |                                   v
-                          |                    +-------------------------------+
-                          |                    | 6. Save Answer + Sources      |
-                          |                    |    in Redis (SETEX with TTL)  |
-                          |                    +-------------------------------+
-                          |                                   |
-                          +-----------------> + <-------------+
+```text
+                              +-------------------------------+
+                              |       1. User Query           |
+                              +-------------------------------+
                                               |
                                               v
                               +-------------------------------+
-                              | 7. Return to Streamlit UI     |
-                              |    (Latency, HIT/MISS Badge)  |
+                              | 2. Check Tier 1 Exact Hash    |
+                              |    (O(1) SHA-256 in Redis)    |
+                              +-------------------------------+
+                                    /                   \
+                   [Tier 1 EXACT HIT]                    [Tier 1 MISS]
+                                 /                         \
+                                v                           v
+          +-----------------------------+     +-------------------------------+
+          | Return Stored JSON Payload  |     | 3. Check Tier 2 Semantic Cache|
+          | {answer, sources, 0.3 ms}   |     |    (Vector Cosine Similarity) |
+          +-----------------------------+     +-------------------------------+
+                         |                          /                   \
+                         |         [Tier 2 SEMANTIC HIT]                 [Tier 2 MISS]
+                         |          (Cosine Sim >= 0.85)                  /
+                         |                     /                         /
+                         |                    v                         v
+                         |     +-----------------------------+     +-------------------------------+
+                         |     | Return Semantic JSON Payload|     | 4. Dense Vector Retrieval     |
+                         |     | {answer, sources, ~2 ms}    |     |    (ChromaDB Top-K Chunks)    |
+                         |     +-----------------------------+     +-------------------------------+
+                         |                    |                                   |
+                         |                    |                                   v
+                         |                    |                    +-------------------------------+
+                         |                    |                    | 5. Context Grounded Prompt    |
+                         |                    |                    +-------------------------------+
+                         |                    |                                   |
+                         |                    |                                   v
+                         |                    |                    +-------------------------------+
+                         |                    |                    | 6. LLM Answer Generation      |
+                         |                    |                    |    (Gemini / OpenAI / Fallback)
+                         |                    |                    +-------------------------------+
+                         |                    |                                   |
+                         |                    |                                   v
+                         |                    |                    +-------------------------------+
+                         |                    |                    | 7. Write to Tier 1 & Tier 2   |
+                         |                    |                    |    Redis Caches (with TTL)    |
+                         |                    |                    +-------------------------------+
+                         |                    |                                   |
+                         +------------------> + <---------------------------------+
+                                              |
+                                              v
+                              +-------------------------------+
+                              | 8. Return to Streamlit UI     |
+                              |    (Latency, Multi-Tier Badge)|
                               +-------------------------------+
 ```
 

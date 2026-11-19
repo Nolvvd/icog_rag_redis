@@ -23,6 +23,41 @@ STOPWORDS = {
     "which", "while", "who", "whom", "why", "will", "with", "you", "your", "yours"
 }
 
+def compute_text_embedding(text: str, dim: int = 2048) -> np.ndarray:
+    """Deterministic term-frequency projection with stopword filtering and high dimensionality.
+    
+    Why this matters:
+    - Filters out high-frequency stopwords (like 'what', 'the', 'is') so they don't drown out content queries.
+    - Uses SHA-256 for deterministic hashing across process restarts (unlike Python's hash() which is randomized).
+    - 2048 dimensions dramatically reduces bucket collisions between unrelated domain terms.
+    """
+    vec = np.zeros(dim, dtype=np.float32)
+    all_words = re.findall(r'\b\w+\b', text.lower())
+    if not all_words:
+        return vec
+
+    # Filter stopwords for content terms
+    content_words = [w for w in all_words if w not in STOPWORDS]
+    target_words = content_words if content_words else all_words
+
+    # Term frequency mapping
+    word_counts = {}
+    for w in target_words:
+        word_counts[w] = word_counts.get(w, 0) + 1
+
+    for w, count in word_counts.items():
+        # Deterministic SHA-256 bucket
+        h = int(hashlib.sha256(w.encode("utf-8")).hexdigest()[:8], 16) % dim
+        # Sublinear term frequency weighting
+        weight = 1.0 + math.log(count)
+        vec[h] += weight
+
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec /= norm
+    return vec
+
+
 class InMemoryVectorStore:
     """A lightweight, robust in-memory vector store using deterministic TF projection & Cosine Similarity."""
     def __init__(self):
@@ -31,38 +66,7 @@ class InMemoryVectorStore:
         self.doc_version: str = "empty"
 
     def _get_simple_embedding(self, text: str, dim: int = 2048) -> np.ndarray:
-        """Deterministic term-frequency projection with stopword filtering and high dimensionality.
-        
-        Why this upgrade matters:
-        - Filters out high-frequency stopwords (like 'what', 'the', 'is') so they don't drown out content queries.
-        - Uses SHA-256 for deterministic hashing across process restarts (unlike Python's hash() which is randomized).
-        - 2048 dimensions dramatically reduces bucket collisions between unrelated domain terms (e.g., 'budget' vs 'clock').
-        """
-        vec = np.zeros(dim, dtype=np.float32)
-        all_words = re.findall(r'\b\w+\b', text.lower())
-        if not all_words:
-            return vec
-
-        # Filter stopwords for content terms
-        content_words = [w for w in all_words if w not in STOPWORDS]
-        target_words = content_words if content_words else all_words
-
-        # Term frequency mapping
-        word_counts = {}
-        for w in target_words:
-            word_counts[w] = word_counts.get(w, 0) + 1
-
-        for w, count in word_counts.items():
-            # Deterministic SHA-256 bucket
-            h = int(hashlib.sha256(w.encode("utf-8")).hexdigest()[:8], 16) % dim
-            # Sublinear term frequency weighting
-            weight = 1.0 + math.log(count)
-            vec[h] += weight
-
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec /= norm
-        return vec
+        return compute_text_embedding(text, dim=dim)
 
     def add_documents(self, chunks: List[Dict[str, Any]], doc_version: str = "v1") -> None:
         self.chunks = chunks

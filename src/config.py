@@ -25,6 +25,11 @@ REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/0")
 CACHE_TTL_SECONDS = int(os.getenv("RAG_CACHE_TTL", "3600"))  # Default: 1 hour
 CACHE_NAMESPACE = "rag:cache"
 
+# Semantic caching settings
+ENABLE_SEMANTIC_CACHE = os.getenv("ENABLE_SEMANTIC_CACHE", "true").lower() == "true"
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.85"))
+SEMANTIC_CACHE_NAMESPACE = "rag:semantic"
+
 # LLM provider settings
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower() or "gemini"
 _raw_model = os.getenv("LLM_MODEL", "").strip() or "gemini-flash-lite-latest"

@@ -335,6 +335,18 @@ blockquote {
     font-weight: 700;
 }
 
+.badge-semantic {
+    display: inline-flex;
+    align-items: center;
+    background: rgba(168, 85, 247, 0.18);
+    color: #C084FC;
+    border: 1px solid rgba(168, 85, 247, 0.45);
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-size: 13.5px;
+    font-weight: 700;
+}
+
 .badge-miss {
     display: inline-flex;
     align-items: center;

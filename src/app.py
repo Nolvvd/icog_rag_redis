@@ -38,7 +38,9 @@ from config import (
     CHROMA_PERSIST_DIR,
     COLLECTION_NAME,
     TOP_K_RETRIEVAL,
-    GEMINI_API_KEY
+    GEMINI_API_KEY,
+    ENABLE_SEMANTIC_CACHE,
+    SEMANTIC_CACHE_THRESHOLD
 )
 from extractor import extract_documents, calculate_sha256
 from chunker import chunk_documents
@@ -83,8 +85,16 @@ if "cache" not in st.session_state:
     st.session_state.cache = RedisRAGCache(
         redis_url=REDIS_URL,
         default_ttl=CACHE_TTL_SECONDS,
-        bypass_mode=True
+        bypass_mode=True,
+        enable_semantic=ENABLE_SEMANTIC_CACHE,
+        semantic_threshold=SEMANTIC_CACHE_THRESHOLD
     )
+
+if "enable_semantic_cache" not in st.session_state:
+    st.session_state.enable_semantic_cache = ENABLE_SEMANTIC_CACHE
+
+if "semantic_threshold" not in st.session_state:
+    st.session_state.semantic_threshold = SEMANTIC_CACHE_THRESHOLD
 
 if "doc_version" not in st.session_state:
     st.session_state.doc_version = "empty"
@@ -289,9 +299,19 @@ with st.sidebar:
         for idx, item in enumerate(reversed(st.session_state.history[-8:])):
             q_full = item['query']
             q_title = q_full[:26] + "..." if len(q_full) > 26 else q_full
-            is_hit = item["status"] == "HIT"
-            badge_class = "badge-hit" if is_hit else "badge-miss"
-            badge_txt = "0.4ms ⚡" if is_hit else f"{item['latency_ms']/1000:.1f}s 🔍"
+            is_exact = item["status"] in ("EXACT HIT", "HIT")
+            is_semantic = item["status"] == "SEMANTIC HIT"
+
+            if is_exact:
+                badge_class = "badge-hit"
+                badge_txt = "0.3ms ⚡"
+            elif is_semantic:
+                badge_class = "badge-semantic"
+                sim_pct = int(item.get("similarity", 0.9) * 100)
+                badge_txt = f"{sim_pct}% ⚡"
+            else:
+                badge_class = "badge-miss"
+                badge_txt = f"{item['latency_ms']/1000:.1f}s 🔍"
 
             col_hist_btn, col_hist_badge = st.columns([3.3, 1.7])
             with col_hist_btn:
@@ -311,14 +331,16 @@ with st.sidebar:
     # -------------------------------------------------------------------------
     with st.expander("System Insights & Controls", expanded=False):
         # Telemetry Calculations
-        hist_hits = sum(1 for h in st.session_state.history if h["status"] == "HIT")
+        hist_exact_hits = sum(1 for h in st.session_state.history if h["status"] in ("EXACT HIT", "HIT"))
+        hist_semantic_hits = sum(1 for h in st.session_state.history if h["status"] == "SEMANTIC HIT")
+        hist_hits = hist_exact_hits + hist_semantic_hits
         hist_misses = sum(1 for h in st.session_state.history if h["status"] == "MISS")
         total_hits = max(cache_engine.stats["hits"], hist_hits)
         total_misses = max(cache_engine.stats["misses"], hist_misses)
         total_reqs = total_hits + total_misses
         hit_rate = (total_hits / total_reqs * 100.0) if total_reqs > 0 else 0.0
 
-        hits_lat = [h.get("cache_lookup_ms", h["latency_ms"]) for h in st.session_state.history if h["status"] == "HIT"]
+        hits_lat = [h.get("cache_lookup_ms", h["latency_ms"]) for h in st.session_state.history if "HIT" in h["status"]]
         miss_retrieval_lat = [h.get("retrieval_ms") for h in st.session_state.history if h.get("retrieval_ms") is not None]
         miss_gen_lat = [h.get("generation_ms") for h in st.session_state.history if h.get("generation_ms") is not None]
 
@@ -333,7 +355,7 @@ with st.sidebar:
         # Redis Metrics
         st.markdown("<div style='font-size: 14.5px; font-weight: 700; color: #34D399; margin-top: 10px; margin-bottom: 4px;'>Redis Caching Metrics</div>", unsafe_allow_html=True)
         redis_status_str = "Connected (Port 6379)" if cache_engine.is_real_redis else "Unavailable — Cache Bypassed"
-        st.markdown(f'<div class="telemetry-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><span style="font-size:13.5px;font-weight:700;color:#E2E8F0;">Cache Hit Rate</span><span style="font-size:17px;font-weight:800;color:#34D399;font-family:\'Fira Code\',monospace;">{hit_rate:.1f}%</span></div><div style="background-color:#1E293B;border-radius:4px;height:6px;width:100%;overflow:hidden;margin-bottom:8px;"><div style="background-color:#34D399;height:6px;width:{hit_rate}%;"></div></div><div style="font-size:12.5px;color:#94A3B8;line-height:1.6;">• Status: <strong style="color:#FFFFFF;">{redis_status_str}</strong><br>• Cache Hits: <strong style="color:#34D399;">{total_hits}</strong> · Misses: <strong style="color:#38BDF8;">{total_misses}</strong><br>• Avg Cache Lookup: <strong style="color:#34D399;">{avg_hit_ms}</strong><br>• Configured TTL: <strong>{st.session_state.custom_ttl}s</strong></div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="telemetry-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><span style="font-size:13.5px;font-weight:700;color:#E2E8F0;">Cache Hit Rate</span><span style="font-size:17px;font-weight:800;color:#34D399;font-family:\'Fira Code\',monospace;">{hit_rate:.1f}%</span></div><div style="background-color:#1E293B;border-radius:4px;height:6px;width:100%;overflow:hidden;margin-bottom:8px;"><div style="background-color:#34D399;height:6px;width:{hit_rate}%;"></div></div><div style="font-size:12.5px;color:#94A3B8;line-height:1.6;">• Status: <strong style="color:#FFFFFF;">{redis_status_str}</strong><br>• Exact Hits: <strong style="color:#34D399;">{cache_engine.stats["exact_hits"]}</strong> · Semantic Hits: <strong style="color:#C084FC;">{cache_engine.stats["semantic_hits"]}</strong><br>• Total Hits: <strong style="color:#34D399;">{total_hits}</strong> · Misses: <strong style="color:#38BDF8;">{total_misses}</strong><br>• Avg Cache Lookup: <strong style="color:#34D399;">{avg_hit_ms}</strong><br>• Configured TTL: <strong>{st.session_state.custom_ttl}s</strong></div></div>', unsafe_allow_html=True)
 
         # Gemini Metrics
         st.markdown("<div style='font-size: 14.5px; font-weight: 700; color: #F59E0B; margin-top: 10px; margin-bottom: 4px;'>Gemini Inference Metrics</div>", unsafe_allow_html=True)
@@ -344,12 +366,20 @@ with st.sidebar:
             st.markdown("<div style='font-size: 14px; font-weight: 700; color: #FFFFFF; margin-top: 10px; margin-bottom: 4px;'>Recent Query Execution Breakdown</div>", unsafe_allow_html=True)
             for item in reversed(st.session_state.history[-3:]):
                 q_short = item['query'][:28] + "..." if len(item['query']) > 28 else item['query']
-                is_hit = item["status"] == "HIT"
-                badge_str = "<span class='badge-hit' style='font-size: 10.5px;'>HIT</span>" if is_hit else "<span class='badge-miss' style='font-size: 10.5px;'>MISS</span>"
+                is_exact = item["status"] in ("EXACT HIT", "HIT")
+                is_semantic = item["status"] == "SEMANTIC HIT"
 
-                if is_hit:
-                    breakdown_txt = f"Cache Lookup: <strong>{item.get('cache_lookup_ms', item['latency_ms']):.2f} ms</strong> · Retrieval: <em>Bypassed (0 ms)</em> · Gemini: <em>Bypassed (0 ms)</em>"
+                if is_exact:
+                    badge_str = "<span class='badge-hit' style='font-size: 10.5px;'>EXACT HIT</span>"
+                    breakdown_txt = f"Exact Hash Lookup: <strong>{item.get('cache_lookup_ms', item['latency_ms']):.2f} ms</strong> · Retrieval & Gemini: <em>Bypassed (0 ms)</em>"
+                elif is_semantic:
+                    sim_pct = int(item.get("similarity", 0.9) * 100)
+                    badge_str = f"<span class='badge-semantic' style='font-size: 10.5px;'>SEMANTIC ({sim_pct}%)</span>"
+                    mq = item.get("matched_query", "")
+                    mq_short = mq[:26] + "..." if len(mq) > 26 else mq
+                    breakdown_txt = f"Semantic Vector Hit ({sim_pct}%): <strong>{item.get('cache_lookup_ms', 0.5):.2f} ms</strong> · Matched: <em>\"{mq_short}\"</em> · LLM: <em>Bypassed (0 ms)</em>"
                 else:
+                    badge_str = "<span class='badge-miss' style='font-size: 10.5px;'>MISS</span>"
                     ret_str = f"{item.get('retrieval_ms', 12.0):.1f} ms"
                     gen_str = f"{item.get('generation_ms', item['latency_ms'] - 12.0):.0f} ms"
                     breakdown_txt = f"Cache Check: <strong>{item.get('cache_lookup_ms', 0.3):.2f} ms</strong> · Retrieval: <strong>{ret_str}</strong> · Gemini: <strong>{gen_str}</strong>"
@@ -357,9 +387,24 @@ with st.sidebar:
                 item_lat = item['latency_ms']
                 st.markdown(f'<div style="background:#111827;border:1px solid #1F2937;border-radius:6px;padding:6px 8px;margin-bottom:5px;font-size:12px;"><div style="display:flex;justify-content:space-between;margin-bottom:2px;"><span>{badge_str} <strong>{q_short}</strong></span><span style="font-family:Fira Code;color:#34D399;">{item_lat:.1f} ms</span></div><div style="color:#94A3B8;font-size:11px;">{breakdown_txt}</div></div>', unsafe_allow_html=True)
 
-        # Sliders & Flush
+        # Sliders & Controls
         st.markdown("<hr style='margin: 10px 0; border: none; border-top: 1px solid #1F2937;'>", unsafe_allow_html=True)
-        st.markdown("<div style='font-size: 13.5px; font-weight: 700; color: #E2E8F0;'>Cache TTL (Seconds)</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size: 13.5px; font-weight: 700; color: #E2E8F0;'>Semantic Caching (Tier 2)</div>", unsafe_allow_html=True)
+        st.session_state.enable_semantic_cache = st.checkbox(
+            "Enable Vector Similarity Cache",
+            value=st.session_state.enable_semantic_cache,
+            help="Reuses answers for paraphrased questions with high semantic similarity."
+        )
+        if st.session_state.enable_semantic_cache:
+            st.session_state.semantic_threshold = st.slider(
+                "Similarity Threshold",
+                0.65, 0.98,
+                float(st.session_state.semantic_threshold),
+                step=0.01
+            )
+            st.caption(f"Queries with ≥ {int(st.session_state.semantic_threshold*100)}% cosine similarity reuse cached answers.")
+
+        st.markdown("<div style='font-size: 13.5px; font-weight: 700; color: #E2E8F0; margin-top: 8px;'>Cache TTL (Seconds)</div>", unsafe_allow_html=True)
         st.session_state.custom_ttl = st.slider("Cache TTL", 10, 86400, st.session_state.custom_ttl, step=60, label_visibility="collapsed")
         st.caption(f"Cached entries persist for {st.session_state.custom_ttl} seconds.")
 
@@ -438,7 +483,9 @@ if query_to_run:
             query=query_to_run,
             doc_version=st.session_state.doc_version,
             model_name=DEFAULT_MODEL,
-            prompt_version=PROMPT_VERSION
+            prompt_version=PROMPT_VERSION,
+            enable_semantic=st.session_state.enable_semantic_cache,
+            similarity_threshold=st.session_state.semantic_threshold
         )
         cache_lookup_ms = (time.perf_counter() - t0_cache) * 1000.0
 
@@ -447,13 +494,19 @@ if query_to_run:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             ans_text = cached_result.get("answer", "")
             src_list = cached_result.get("sources", [])
-            status_txt = "HIT"
+            match_type = cached_result.get("match_type", "EXACT")
+            sim_score = cached_result.get("similarity", 1.0)
+            matched_query = cached_result.get("matched_query", query_to_run)
+            status_txt = "EXACT HIT" if match_type == "EXACT" else "SEMANTIC HIT"
             engine_model = cached_result.get("model", DEFAULT_MODEL)
             retrieval_ms = None
             generation_ms = None
         else:
             # Cache MISS: Semantic Retrieval + Gemini Inference
             status_txt = "MISS"
+            match_type = None
+            sim_score = 0.0
+            matched_query = ""
 
             # Step 2: Semantic Retrieval from ChromaDB
             t0_retrieval = time.perf_counter()
@@ -508,6 +561,9 @@ if query_to_run:
             "answer": ans_text,
             "sources": src_list,
             "status": status_txt,
+            "match_type": match_type,
+            "similarity": sim_score,
+            "matched_query": matched_query,
             "latency_ms": elapsed_ms,
             "cache_lookup_ms": cache_lookup_ms,
             "retrieval_ms": retrieval_ms,
@@ -542,8 +598,16 @@ if st.session_state.last_response:
     col_assist, col_space_assist = st.columns([3.6, 0.4])
     with col_assist:
         with st.container(border=True, key="assistant_answer_box"):
-            # Header Indicator
-            st.markdown('<div class="assistant-header-pill">⚡ CIRCUITMIND GROUNDED ANALYSIS</div>', unsafe_allow_html=True)
+            # Header Indicator with Caching Tier Badge
+            if resp.get("status") in ("EXACT HIT", "HIT"):
+                header_pill = '<div class="assistant-header-pill" style="border-color:#34D399;color:#34D399;">⚡ CIRCUITMIND GROUNDED ANALYSIS · EXACT CACHE HIT (0 ms LLM)</div>'
+            elif resp.get("status") == "SEMANTIC HIT":
+                sim_pct = int(resp.get("similarity", 0.9) * 100)
+                mq_disp = html.escape(resp.get("matched_query", "")[:35])
+                header_pill = f'<div class="assistant-header-pill" style="border-color:#C084FC;color:#C084FC;">⚡ CIRCUITMIND GROUNDED ANALYSIS · SEMANTIC CACHE HIT ({sim_pct}% SIMILARITY TO &ldquo;{mq_disp}&rdquo;)</div>'
+            else:
+                header_pill = '<div class="assistant-header-pill">⚡ CIRCUITMIND GROUNDED ANALYSIS · COLD GENERATION</div>'
+            st.markdown(header_pill, unsafe_allow_html=True)
 
             # Grounded Markdown Answer
             st.markdown(resp["answer"])

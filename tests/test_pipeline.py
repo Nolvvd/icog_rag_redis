@@ -128,9 +128,31 @@ class TestRAGRedisPipeline(unittest.TestCase):
         write_ok = offline_cache.set("offline query", self.doc_hash_v1, self.model_name, "answer", [], ttl=60)
         self.assertTrue(write_ok)
 
+    def test_10_semantic_cache_hit_on_paraphrased_query(self):
+        """Requirement: Paraphrased queries trigger a Semantic Cache Hit (Tier 2)."""
+        original_query = "What is the formula for Scaled Dot-Product Attention?"
+        retrieved = self.vector_store.similarity_search(original_query, top_k=2)
+        answer = generate_grounded_answer(original_query, retrieved, model_name=self.model_name)
+        self.cache.set(original_query, self.doc_hash_v1, self.model_name, answer, retrieved, ttl=60)
+
+        # Paraphrased query with different phrasing/synonyms
+        paraphrased_query = "Can you explain the formula of scaled dot product attention?"
+        payload = self.cache.get(paraphrased_query, self.doc_hash_v1, self.model_name, similarity_threshold=0.80)
+        self.assertIsNotNone(payload, "Paraphrased query must produce a semantic cache hit.")
+        self.assertEqual(payload.get("match_type"), "SEMANTIC", "Match type must be SEMANTIC.")
+        self.assertGreaterEqual(payload.get("similarity", 0), 0.80, "Similarity score must be >= 0.80.")
+        self.assertEqual(payload["answer"], answer, "Cached answer must be preserved.")
+        self.assertEqual(len(payload["sources"]), len(retrieved), "Source citations must be preserved.")
+
+    def test_11_semantic_cache_miss_on_unrelated_query(self):
+        """Requirement: Unrelated queries must produce a Cache Miss despite semantic cache."""
+        unrelated_query = "How does backpropagation work in deep neural networks?"
+        payload = self.cache.get(unrelated_query, self.doc_hash_v1, self.model_name, similarity_threshold=0.80)
+        self.assertIsNone(payload, "Unrelated query must produce a cache miss.")
+
 def run_performance_benchmarks():
     print("\n" + "=" * 70)
-    print("EMPIRICAL LATENCY BENCHMARK: CACHE MISS VS CACHE HIT")
+    print("EMPIRICAL LATENCY BENCHMARK: 3-TIER CACHING SPECTRUM")
     print("=" * 70)
 
     sample_path = PROJECT_ROOT / "data" / "sample_transformers.txt"
@@ -145,30 +167,39 @@ def run_performance_benchmarks():
     cache = RedisRAGCache(default_ttl=3600)
     cache.clear()
 
-    query = "Explain multi-head attention and why it is useful."
+    query_exact = "Explain multi-head attention and why it is useful."
+    query_paraphrased = "Explain how multi-head attention works and why it is useful."
     model = "test-model-v1"
 
-    # Measure Cache Miss
+    # 1. Measure Cache Miss (Cold)
     t0 = time.perf_counter()
-    res = cache.get(query, doc_hash, model)
+    res = cache.get(query_exact, doc_hash, model)
     assert res is None
-    matched = v_store.similarity_search(query, top_k=3)
-    answer = generate_grounded_answer(query, matched, provider="offline", model_name=model)
-    cache.set(query, doc_hash, model, answer, matched, ttl=3600)
+    matched = v_store.similarity_search(query_exact, top_k=3)
+    answer = generate_grounded_answer(query_exact, matched, provider="offline", model_name=model)
+    cache.set(query_exact, doc_hash, model, answer, matched, ttl=3600)
     miss_latency_ms = (time.perf_counter() - t0) * 1000.0
 
-    # Measure Cache Hit
+    # 2. Measure Tier 1 Exact Hit (Warm Hash Match)
     t1 = time.perf_counter()
-    hit_res = cache.get(query, doc_hash, model)
-    assert hit_res is not None
-    hit_latency_ms = (time.perf_counter() - t1) * 1000.0
+    exact_res = cache.get(query_exact, doc_hash, model)
+    assert exact_res is not None and exact_res.get("match_type") == "EXACT"
+    exact_latency_ms = (time.perf_counter() - t1) * 1000.0
 
-    speedup = miss_latency_ms / max(0.001, hit_latency_ms)
+    # 3. Measure Tier 2 Semantic Hit (Warm Paraphrase Vector Match)
+    t2 = time.perf_counter()
+    semantic_res = cache.get(query_paraphrased, doc_hash, model, similarity_threshold=0.80)
+    assert semantic_res is not None and semantic_res.get("match_type") == "SEMANTIC"
+    semantic_latency_ms = (time.perf_counter() - t2) * 1000.0
 
-    print(f"Query: '{query}'")
-    print(f"  [Cache MISS] Vector Search + Generation Latency: {miss_latency_ms:.2f} ms")
-    print(f"  [Cache HIT ] Redis Cache-Aside Latency:           {hit_latency_ms:.2f} ms")
-    print(f"  [Speedup   ] In-Memory / Redis Acceleration:       {speedup:.1f}x faster")
+    speedup_exact = miss_latency_ms / max(0.001, exact_latency_ms)
+    speedup_semantic = miss_latency_ms / max(0.001, semantic_latency_ms)
+
+    print(f"Base Query:        '{query_exact}'")
+    print(f"Paraphrased Query: '{query_paraphrased}'")
+    print(f"  [Tier 3 MISS]        Vector Search + Generation Latency: {miss_latency_ms:.2f} ms")
+    print(f"  [Tier 2 SEMANTIC]    Vector Similarity Cache ({semantic_res['similarity']*100:.1f}%): {semantic_latency_ms:.2f} ms ({speedup_semantic:.1f}x faster)")
+    print(f"  [Tier 1 EXACT HIT]   Redis O(1) Hash-Aside Latency:      {exact_latency_ms:.2f} ms ({speedup_exact:.1f}x faster)")
     print("=" * 70)
 
 if __name__ == "__main__":
